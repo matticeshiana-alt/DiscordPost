@@ -1,11 +1,23 @@
 // ================================================================
 // ANUA SEEDING BOT — Node.js Gateway Bot
+// Includes a minimal HTTP server so Railway keeps it alive
 // ================================================================
 
 const { Client, GatewayIntentBits, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const fetch = require('node-fetch');
 const fs    = require('fs');
 const path  = require('path');
+const http  = require('http');
+
+// ── Keepalive HTTP server ───────────────────────────────────
+// Railway kills processes with no open port — this prevents that
+const PORT = process.env.PORT || 3000;
+http.createServer((req, res) => {
+  res.writeHead(200);
+  res.end('ANUA Seeding Bot — online');
+}).listen(PORT, () => {
+  console.log(`🌐 Keepalive server listening on port ${PORT}`);
+});
 
 const client = new Client({
   intents: [
@@ -46,7 +58,6 @@ const PRODUCTS = {
 };
 
 // ── Persistent pending store ────────────────────────────────
-// Stored as a JSON file so button clicks work even after restarts
 const PENDING_FILE = path.join('/tmp', 'pending.json');
 
 function loadPending() {
@@ -194,7 +205,6 @@ client.on('messageCreate', async (message) => {
     components: [row],
   });
 
-  // Store in persistent file so button clicks work after restarts
   setPending(prompt.id, {
     link,
     project:   server.name,
@@ -202,7 +212,6 @@ client.on('messageCreate', async (message) => {
     expiresAt: Date.now() + 5 * 60 * 1000,
   });
 
-  // Auto-expire after 5 minutes
   setTimeout(async () => {
     const state = getPending(prompt.id);
     if (state) {
@@ -221,13 +230,19 @@ client.on('interactionCreate', async (interaction) => {
   const state = getPending(interaction.message.id);
 
   if (!state || Date.now() > state.expiresAt) {
-    await interaction.reply({ content: '⏱️ This selection has expired. Please paste your link again.', ephemeral: true });
+    await interaction.reply({
+      content: '⏱️ This selection has expired. Please paste your link again.',
+      ephemeral: true,
+    });
     if (state) deletePending(interaction.message.id);
     return;
   }
 
   if (interaction.user.id !== state.userId) {
-    await interaction.reply({ content: '❌ Only the person who posted the link can select the product.', ephemeral: true });
+    await interaction.reply({
+      content: '❌ Only the person who posted the link can select the product.',
+      ephemeral: true,
+    });
     return;
   }
 
@@ -241,7 +256,6 @@ client.on('interactionCreate', async (interaction) => {
 
   const [productKey, productInfo] = productEntry;
 
-  // Acknowledge immediately to prevent "interaction failed"
   await interaction.deferUpdate();
 
   const result = await logToSheet(state.link, productKey, state.project);
@@ -257,7 +271,7 @@ client.on('interactionCreate', async (interaction) => {
 
   if (!result?.success) {
     await interaction.editReply({
-      content: `⚠️ <@${state.userId}> Something went wrong logging your submission. Please try again or contact an admin.\n\`${result?.error || 'unknown error'}\``,
+      content: `⚠️ <@${state.userId}> Something went wrong. Please try again or contact an admin.\n\`${result?.error || 'unknown error'}\``,
       components: [],
     });
     return;
