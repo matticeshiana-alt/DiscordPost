@@ -277,7 +277,7 @@ client.on('interactionCreate', async (interaction) => {
 });
 
 // ── Start ───────────────────────────────────────────────────
-client.once('ready', () => {
+client.once('clientReady', () => {
   console.log(`✅ Bot online as ${client.user.tag}`);
   console.log(`   Watching channels: ${SUBMISSION_CHANNELS.join(', ')}`);
   console.log(`   Active products: ${Object.keys(PRODUCTS).join(', ')}`);
