@@ -1,28 +1,11 @@
 // ================================================================
 // ANUA SEEDING BOT — Node.js Gateway Bot
-// Deploy on Railway or Render (free tier)
-//
-// FLOW:
-//   1. Seeder pastes a video link in #content-submission or
-//      #content-submission📸
-//   2. Bot replies with 3 product buttons
-//   3. Seeder clicks a button
-//   4. Bot logs link + product + country to Apps Script (무가시딩)
-//   5. Bot confirms ✅ and cleans up the button message
-//
-// ENV VARS NEEDED:
-//   DISCORD_BOT_TOKEN     — bot token from Discord Developer Portal
-//   APPS_SCRIPT_POST_URL  — deployed web app URL from ContentSubmissionSync.gs
-//
-// INSTALL:
-//   npm install discord.js node-fetch
-//
-// START:
-//   node bot.js
 // ================================================================
 
 const { Client, GatewayIntentBits, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const fetch = require('node-fetch');
+const fs    = require('fs');
+const path  = require('path');
 
 const client = new Client({
   intents: [
@@ -41,7 +24,6 @@ const SERVERS = {
   '1456468324568273037': { name: 'CA' },
 };
 
-// Active products — update when drops change
 const PRODUCTS = {
   'PDRN': {
     label:    'PDRN Serum Spray',
@@ -63,7 +45,42 @@ const PRODUCTS = {
   },
 };
 
-// ── URL validation ──────────────────────────────────────────
+// ── Persistent pending store ────────────────────────────────
+// Stored as a JSON file so button clicks work even after restarts
+const PENDING_FILE = path.join('/tmp', 'pending.json');
+
+function loadPending() {
+  try {
+    if (fs.existsSync(PENDING_FILE)) {
+      return JSON.parse(fs.readFileSync(PENDING_FILE, 'utf8'));
+    }
+  } catch(e) { console.error('loadPending error:', e.message); }
+  return {};
+}
+
+function savePending(pending) {
+  try {
+    fs.writeFileSync(PENDING_FILE, JSON.stringify(pending), 'utf8');
+  } catch(e) { console.error('savePending error:', e.message); }
+}
+
+function getPending(messageId) {
+  return loadPending()[messageId] || null;
+}
+
+function setPending(messageId, data) {
+  const pending = loadPending();
+  pending[messageId] = data;
+  savePending(pending);
+}
+
+function deletePending(messageId) {
+  const pending = loadPending();
+  delete pending[messageId];
+  savePending(pending);
+}
+
+// ── URL helpers ─────────────────────────────────────────────
 function isValidVideoUrl(url) {
   return [
     /https?:\/\/(?:www\.|vm\.|vt\.)?tiktok\.com\/[^\s<>"]+/i,
@@ -74,13 +91,11 @@ function isValidVideoUrl(url) {
   ].some(p => p.test(url));
 }
 
-// ── Extract first URL from a message ───────────────────────
 function extractUrl(content) {
   const match = content.match(/https?:\/\/[^\s<>"]+/i);
   return match ? match[0] : null;
 }
 
-// ── Normalize URL ───────────────────────────────────────────
 function normalizeUrl(raw) {
   if (!raw) return raw;
   let url = raw.trim();
@@ -106,7 +121,6 @@ function normalizeUrl(raw) {
   return url;
 }
 
-// ── Detect platform ─────────────────────────────────────────
 function detectPlatform(url) {
   const u = (url || '').toLowerCase();
   if (u.includes('tiktok.com'))                             return 'TikTok';
@@ -115,7 +129,6 @@ function detectPlatform(url) {
   return 'Unknown';
 }
 
-// ── Extract handle from URL ─────────────────────────────────
 function extractHandle(url) {
   const tt = url.match(/tiktok\.com\/@([A-Za-z0-9._]+)/i);
   if (tt) return '@' + tt[1];
@@ -126,7 +139,7 @@ function extractHandle(url) {
   return null;
 }
 
-// ── Send to Apps Script ─────────────────────────────────────
+// ── Log to Apps Script ──────────────────────────────────────
 async function logToSheet(link, productKey, project) {
   try {
     const res  = await fetch(process.env.APPS_SCRIPT_POST_URL, {
@@ -144,29 +157,20 @@ async function logToSheet(link, productKey, project) {
   }
 }
 
-// ── Pending interactions ────────────────────────────────────
-// Stores { link, project, userId, originalMessageId } keyed by button message ID
-// so we know what to log when a button is clicked
-const pending = new Map();
-
 // ── Message listener ────────────────────────────────────────
 client.on('messageCreate', async (message) => {
-  // Ignore bots
   if (message.author.bot) return;
 
-  // Only watch submission channels
   const channelName = message.channel.name || '';
   if (!SUBMISSION_CHANNELS.includes(channelName)) return;
 
-  // Only handle configured servers
   const server = SERVERS[message.guildId];
   if (!server) return;
 
-  // Extract and validate URL
   const rawUrl = extractUrl(message.content);
-  if (!rawUrl) return; // No URL in message — ignore silently
+  if (!rawUrl) return;
+
   if (!isValidVideoUrl(rawUrl)) {
-    // Has a URL but it's not a valid video — gently flag it
     await message.reply(
       `❌ That doesn't look like a valid TikTok, Instagram Reel, or YouTube link.\n` +
       `Please paste a direct video link.`
@@ -176,7 +180,6 @@ client.on('messageCreate', async (message) => {
 
   const link = normalizeUrl(rawUrl);
 
-  // Build product selection buttons
   const row = new ActionRowBuilder().addComponents(
     ...Object.entries(PRODUCTS).map(([key, val]) =>
       new ButtonBuilder()
@@ -191,20 +194,22 @@ client.on('messageCreate', async (message) => {
     components: [row],
   });
 
-  // Store pending state keyed by the button message ID
-  pending.set(prompt.id, {
+  // Store in persistent file so button clicks work after restarts
+  setPending(prompt.id, {
     link,
-    project:           server.name,
-    userId:            message.author.id,
-    originalMessageId: message.id,
-    channelId:         message.channelId,
+    project:   server.name,
+    userId:    message.author.id,
+    expiresAt: Date.now() + 5 * 60 * 1000,
   });
 
-  // Auto-expire after 5 minutes if no button clicked
-  setTimeout(() => {
-    if (pending.has(prompt.id)) {
-      pending.delete(prompt.id);
-      prompt.edit({ content: '⏱️ Product selection timed out.', components: [] }).catch(() => {});
+  // Auto-expire after 5 minutes
+  setTimeout(async () => {
+    const state = getPending(prompt.id);
+    if (state) {
+      deletePending(prompt.id);
+      try {
+        await prompt.edit({ content: '⏱️ Product selection timed out.', components: [] });
+      } catch {}
     }
   }, 5 * 60 * 1000);
 });
@@ -213,39 +218,34 @@ client.on('messageCreate', async (message) => {
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isButton()) return;
 
-  // Find the pending entry for this button message
-  const state = pending.get(interaction.message.id);
-  if (!state) {
-    await interaction.reply({ content: '⏱️ This selection has expired.', ephemeral: true });
+  const state = getPending(interaction.message.id);
+
+  if (!state || Date.now() > state.expiresAt) {
+    await interaction.reply({ content: '⏱️ This selection has expired. Please paste your link again.', ephemeral: true });
+    if (state) deletePending(interaction.message.id);
     return;
   }
 
-  // Only the original poster can click the button
   if (interaction.user.id !== state.userId) {
     await interaction.reply({ content: '❌ Only the person who posted the link can select the product.', ephemeral: true });
     return;
   }
 
-  // Map button ID back to product key
-  const productKey = Object.entries(PRODUCTS).find(
+  const productEntry = Object.entries(PRODUCTS).find(
     ([, val]) => val.buttonId === interaction.customId
-  )?.[0];
-
-  if (!productKey) {
+  );
+  if (!productEntry) {
     await interaction.reply({ content: '❌ Unknown product.', ephemeral: true });
     return;
   }
 
-  const productInfo = PRODUCTS[productKey];
+  const [productKey, productInfo] = productEntry;
 
-  // Defer so Discord doesn't time out while we call Apps Script
+  // Acknowledge immediately to prevent "interaction failed"
   await interaction.deferUpdate();
 
-  // Log to sheet
   const result = await logToSheet(state.link, productKey, state.project);
-
-  // Clean up pending state
-  pending.delete(interaction.message.id);
+  deletePending(interaction.message.id);
 
   if (result?.duplicate) {
     await interaction.editReply({
@@ -257,7 +257,7 @@ client.on('interactionCreate', async (interaction) => {
 
   if (!result?.success) {
     await interaction.editReply({
-      content: `⚠️ <@${state.userId}> Something went wrong. Please try again or contact an admin.`,
+      content: `⚠️ <@${state.userId}> Something went wrong logging your submission. Please try again or contact an admin.\n\`${result?.error || 'unknown error'}\``,
       components: [],
     });
     return;
